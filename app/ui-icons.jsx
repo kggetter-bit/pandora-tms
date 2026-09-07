@@ -1,0 +1,53 @@
+import React from "react";
+
+const makeIcon = (symbol) => function Icon({ size = 16, className = "", style, ...props }) {
+  return <span aria-hidden="true" className={`pandora-icon ${className}`} style={{ width: size, height: size, fontSize: Math.max(11, size * 0.78), ...style }} {...props}>{symbol}</span>;
+};
+
+export const Truck = makeIcon("▰");
+export const PackageSearch = makeIcon("▣");
+export const Route = makeIcon("↝");
+export const Radio = makeIcon("◉");
+export const Wifi = makeIcon("⌁");
+export const WifiOff = makeIcon("×");
+export const CheckCircle2 = makeIcon("✓");
+export const Clock = makeIcon("◷");
+export const PlusCircle = makeIcon("+");
+export const Edit3 = makeIcon("✎");
+export const Save = makeIcon("↓");
+export const RefreshCw = makeIcon("↻");
+export const LayoutGrid = makeIcon("▦");
+export const X = makeIcon("×");
+export const ClipboardList = makeIcon("▤");
+export const ArrowRight = makeIcon("→");
+export const Star = makeIcon("★");
+export const MapPinned = makeIcon("⌖");
+export const Navigation = makeIcon("➤");
+export const Users = makeIcon("♟");
+export const Car = makeIcon("▱");
+export const Camera = makeIcon("◉");
+export const FileCheck = makeIcon("✓");
+export const Undo2 = makeIcon("↶");
+export const DollarSign = makeIcon("฿");
+export const Wrench = makeIcon("⚙");
+export const AlertTriangle = makeIcon("!");
+export const Gauge = makeIcon("◔");
+export const Calendar = makeIcon("▦");
+export const ShieldCheck = makeIcon("◆");
+export const Award = makeIcon("★");
+export const TrendingUp = makeIcon("↗");
+export const TrendingDown = makeIcon("↘");
+export const Boxes = makeIcon("▦");
+export const Warehouse = makeIcon("⌂");
+export const Fuel = makeIcon("▥");
+export const UserCircle = makeIcon("●");
+export const Bell = makeIcon("♧");
+export const FileText = makeIcon("▤");
+export const Link2 = makeIcon("∞");
+export const MessageSquare = makeIcon("□");
+export const Filter = makeIcon("≡");
+export const ChevronRight = makeIcon("›");
+export const Smartphone = makeIcon("▯");
+export const QrCode = makeIcon("▦");
+export const XCircle = makeIcon("⊗");
+
