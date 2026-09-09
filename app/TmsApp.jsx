@@ -19,8 +19,14 @@ import {
 /* HELPERS                                                              */
 /* ================================================================== */
 
-const rand = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+let randomSeed = 260708;
+const random = () => { randomSeed = (randomSeed * 1664525 + 1013904223) % 4294967296; return randomSeed / 4294967296; };
+const rand = (min, max) => Math.floor(random() * (max - min + 1)) + min;
 const pick = (arr) => arr[rand(0, arr.length - 1)];
+const loadLocalState = () => {
+  if (typeof window === "undefined") return null;
+  try { return JSON.parse(window.localStorage.getItem("pandora-tms-linked-v2")); } catch { return null; }
+};
 
 /* ================================================================== */
 /* DATA — standalone demo data (in a real deployment this comes from   */
@@ -292,7 +298,7 @@ function makeBatch(name, desc, specs) {
         platform: pick(platforms),
         customer: pick(["คุณสมชาย", "IT City", "คุณนภา", "Advice PC", "คุณกิตติ", "JIB Computer", "คุณวรรณา", "Banana IT"]),
         area, subdistrict: loc.subdistrict, district: loc.district, province: loc.province, address: loc.address,
-        origin: Math.random() < 0.65 ? "MDC" : "TKS",
+        origin: random() < 0.65 ? "MDC" : "TKS",
         items: rand(1, 6), cube: +(rand(cubeMin * 100, cubeMax * 100) / 100).toFixed(2),
         status: "รอจัดสรร", date: "2569-07-08", slot: pick(["12:00", "16:00"]),
       });
@@ -400,7 +406,7 @@ function genTripHistory() {
       const tripsToday = rand(2, 6);
       for (let i = 0; i < tripsToday; i++) {
         const route = pick(AREAS);
-        const mode = Math.random() < 0.62 ? "FTL" : "Parcel";
+        const mode = random() < 0.62 ? "FTL" : "Parcel";
         const carrier = pick(["MDC", "TKS"]);
         const orders = mode === "FTL" ? rand(5, 30) : rand(1, 8);
         const cube = mode === "FTL" ? +(rand(300, 4800) / 100).toFixed(2) : +(rand(5, 60) / 100).toFixed(2);
@@ -462,9 +468,9 @@ function genOrders() {
           id: `ORD-${String(30000 + n).padStart(6, "0")}`,
           platform: pick(platforms), customer: pick(customers), area,
           subdistrict: loc.subdistrict, district: loc.district, province: loc.province, address: loc.address,
-          origin: Math.random() < 0.65 ? "MDC" : "TKS",
+          origin: random() < 0.65 ? "MDC" : "TKS",
           items: rand(1, 8), cube: +(rand(cubeMin * 100, cubeMax * 100) / 100).toFixed(2),
-          status: d <= 8 ? "สำเร็จ" : pick(statuses), date: day,
+          status: d < 8 ? "สำเร็จ" : d === 8 ? "รอจัดสรร" : pick(statuses), date: day,
           slot: pick(["09:00", "12:00", "16:00", "19:00"]),
         });
         n++;
@@ -552,7 +558,7 @@ function evaluateGroup(selectedOrders) {
 
 // Shared booking action for both the auto-simulation and the standalone Manual Dispatch page —
 // keeps the trip-creation logic in one place even though the two pages are now separate.
-function bookDispatch({ ev, mode, vendor, date, route, isManual, trips, setTrips, vehicles, addLog }) {
+function bookDispatch({ ev, mode, vendor, date, route, isManual, trips, setTrips, setOrders, setShipments, vehicles, addLog }) {
   const routeLabel = ev.mixedRoutes ? `${ev.dominantArea} (+อื่นๆ)` : (route || ev.dominantArea);
   const chosen = ev.all.find((o) => o.mode === mode);
   if (mode === "FTL") {
@@ -568,6 +574,17 @@ function bookDispatch({ ev, mode, vendor, date, route, isManual, trips, setTrips
       };
     });
     setTrips((list) => [...newTrips, ...list]);
+    const tripByOrder = new Map(newTrips.flatMap((trip) => trip.orderIds.map((id) => [id, trip])));
+    setOrders((list) => list.map((order) => tripByOrder.has(order.id) ? { ...order, status: "จัดรถแล้ว", tripId: tripByOrder.get(order.id).id } : order));
+    setShipments((list) => {
+      const existing = new Set(list.map((shipment) => shipment.orderId));
+      const updated = list.map((shipment) => {
+        const trip = tripByOrder.get(shipment.orderId);
+        return trip ? { ...shipment, status: "Carrier Assigned", carrier: vendor, serviceType: "FTL", tripId: trip.id, vehicleId: trip.vehicleId, consolidated: trip.orderIds.length > 1 } : shipment;
+      });
+      const added = ev.orders.filter((order) => !existing.has(order.id)).map((order, index) => { const trip = tripByOrder.get(order.id); return { id: `SHP-${Date.now()}-${index}`, direction: "Outbound", orderId: order.id, customer: order.customer, area: order.area, cube: order.cube, serviceType: "FTL", carrier: vendor, priority: "Normal", status: "Carrier Assigned", consolidated: trip.orderIds.length > 1, split: false, tripId: trip.id, vehicleId: trip.vehicleId }; });
+      return [...added, ...updated];
+    });
     addLog(`${isManual ? "[Manual] " : ""}จัดรถ ${vendorName(vendor)} (FTL) · ต้นทาง ${CARRIER_LABEL[ev.origin]} · สาย ${routeLabel} — แบ่ง ${newTrips.length} เที่ยว · ต้นทุน ฿${chosen.cost.toLocaleString()}`);
     return { tripIds: newTrips.map((t) => t.id), mode, vendor, cost: chosen.cost, count: ev.numOrders };
   }
@@ -578,6 +595,14 @@ function bookDispatch({ ev, mode, vendor, date, route, isManual, trips, setTrips
     orderDetails: ev.orders.map((o) => ({ id: o.id, customer: o.customer, cube: o.cube, product: productFor(o.id).name })),
   };
   setTrips((list) => [trip, ...list]);
+  const bookedIds = new Set(trip.orderIds);
+  setOrders((list) => list.map((order) => bookedIds.has(order.id) ? { ...order, status: "จัดรถแล้ว", tripId: trip.id } : order));
+  setShipments((list) => {
+    const existing = new Set(list.map((shipment) => shipment.orderId));
+    const updated = list.map((shipment) => bookedIds.has(shipment.orderId) ? { ...shipment, status: "Carrier Assigned", carrier: vendor, serviceType: "PARCEL", tripId: trip.id, vehicleId: null } : shipment);
+    const added = ev.orders.filter((order) => !existing.has(order.id)).map((order, index) => ({ id: `SHP-${Date.now()}-${index}`, direction: "Outbound", orderId: order.id, customer: order.customer, area: order.area, cube: order.cube, serviceType: "PARCEL", carrier: vendor, priority: "Normal", status: "Carrier Assigned", consolidated: false, split: false, tripId: trip.id, vehicleId: null }));
+    return [...added, ...updated];
+  });
   addLog(`${isManual ? "[Manual] " : ""}จัดรถ ${vendorName(vendor)} (Parcel) · ต้นทาง ${CARRIER_LABEL[ev.origin]} · สาย ${routeLabel} — ต้นทุน ฿${chosen.cost.toLocaleString()}`);
   return { tripIds: [trip.id], mode, vendor, cost: chosen.cost, count: ev.numOrders };
 }
@@ -646,13 +671,13 @@ const GRADE_ACTION = {
 };
 function genCarrierScorecards() {
   return CARRIER_DIRECTORY.map((c) => {
-    const onTimePickup = +(90 + Math.random() * 9).toFixed(1);
-    const onTimeArrival = +(88 + Math.random() * 10).toFixed(1);
-    const onTimeDelivery = +(85 + Math.random() * 14).toFixed(1);
-    const inFull = +(92 + Math.random() * 7.8).toFixed(1);
-    const otif = +(Math.min(onTimeDelivery, inFull) - Math.random() * 3).toFixed(1);
-    const damageRate = +(Math.random() * 3).toFixed(2);
-    const podCompletion = +(90 + Math.random() * 9.5).toFixed(1);
+    const onTimePickup = +(90 + random() * 9).toFixed(1);
+    const onTimeArrival = +(88 + random() * 10).toFixed(1);
+    const onTimeDelivery = +(85 + random() * 14).toFixed(1);
+    const inFull = +(92 + random() * 7.8).toFixed(1);
+    const otif = +(Math.min(onTimeDelivery, inFull) - random() * 3).toFixed(1);
+    const damageRate = +(random() * 3).toFixed(2);
+    const podCompletion = +(90 + random() * 9.5).toFixed(1);
     const damageInv = Math.max(0, 100 - damageRate * 12);
     const metrics = { onTimePickup, onTimeArrival, onTimeDelivery, inFull, otif, damageInv };
     const totalW = CARRIER_KPI_WEIGHTS.reduce((a, k) => a + k.weight, 0);
@@ -684,8 +709,8 @@ function genDrivers() {
   const names = ["สมชาย ใจดี", "วิชัย รุ่งเรือง", "ประยุทธ์ ขยันงาน", "อนุชา สายเดินทาง", "ธีระ มั่นคง", "กิตติ ตรงเวลา", "สมพงษ์ ปลอดภัย", "ณรงค์ ไวเสมอ"];
   return names.map((name, i) => ({
     id: `DR-${String(100 + i)}`, name, license: `TH-${rand(100000, 999999)}`,
-    experienceYears: rand(1, 15), onTimeRate: +(88 + Math.random() * 11).toFixed(1),
-    podRate: +(90 + Math.random() * 9.5).toFixed(1), rating: +(3.8 + Math.random() * 1.2).toFixed(1),
+    experienceYears: rand(1, 15), onTimeRate: +(88 + random() * 11).toFixed(1),
+    podRate: +(90 + random() * 9.5).toFixed(1), rating: +(3.8 + random() * 1.2).toFixed(1),
     speedingIncidents: rand(0, 3), status: pick(["On Duty", "On Duty", "Off Duty", "On Trip"]),
   }));
 }
@@ -694,12 +719,12 @@ const DRIVERS_INIT = genDrivers();
 // --- 3.1 Shipment Management (lifecycle) ---
 const SHIPMENT_STATUSES = ["Draft", "Planned", "Carrier Assigned", "Dispatched", "In-Transit", "Delivered", "Exception"];
 function genShipments(orders) {
-  return orders.slice(0, 24).map((o, i) => ({
+  return orders.filter((o) => o.date === "2569-07-08").map((o, i) => ({
     id: `SHP-${String(5000 + i)}`, direction: "Outbound", orderId: o.id, customer: o.customer, area: o.area,
     cube: o.cube, serviceType: pick(["FTL", "LTL", "PARCEL", "LASTMILE", "MULTIDROP"]),
-    carrier: pick(["MDC", "TKS", "KERRY", "FLASH", "SYNFLEET"]),
+    carrier: null,
     priority: pick(["Normal", "Normal", "Normal", "VIP"]),
-    status: pick(SHIPMENT_STATUSES), consolidated: Math.random() < 0.25, split: Math.random() < 0.1,
+    status: "Draft", consolidated: false, split: false, tripId: null, vehicleId: null,
   }));
 }
 
@@ -723,7 +748,7 @@ const NON_DELIVERY_REASONS = ["ลูกค้าไม่อยู่", "ที
 function genPODs() {
   const out = [];
   for (let i = 1; i <= 18; i++) {
-    const delivered = Math.random() < 0.88;
+    const delivered = random() < 0.88;
     out.push({
       id: `POD-${String(7000 + i)}`, shipmentId: `SHP-${String(5000 + rand(0, 23))}`,
       delivered, receiver: delivered ? pick(["คุณสมชาย", "คุณนภา", "เจ้าหน้าที่หน้าร้าน", "รปภ."]) : "-",
@@ -770,14 +795,14 @@ const COST_TYPES = [
   { id: "damageClaim", label: "Damage Claim", pct: [0.005, 0.02] },
 ];
 function splitCost(totalCost) {
-  const raw = COST_TYPES.map((c) => ({ id: c.id, label: c.label, amount: totalCost * (c.pct[0] + Math.random() * (c.pct[1] - c.pct[0])) }));
+  const raw = COST_TYPES.map((c) => ({ id: c.id, label: c.label, amount: totalCost * (c.pct[0] + random() * (c.pct[1] - c.pct[0])) }));
   const sum = raw.reduce((a, r) => a + r.amount, 0);
   return raw.map((r) => ({ ...r, amount: Math.round((r.amount / sum) * totalCost) }));
 }
 function genInvoices(trips) {
   return trips.slice(0, 30).map((t, i) => {
     const expected = t.cost;
-    const variance = Math.random() < 0.75 ? 0 : Math.round(expected * (Math.random() * 0.12 - 0.02));
+    const variance = random() < 0.75 ? 0 : Math.round(expected * (random() * 0.12 - 0.02));
     const actual = expected + variance;
     return {
       id: `INV-${String(8000 + i)}`, tripId: t.id, carrier: t.carrier, date: t.date,
@@ -862,14 +887,16 @@ const chartTip = { contentStyle: { background: "#FFFFFF", border: "1px solid var
 /* ================================================================== */
 
 export default function App() {
+  const [storageReady, setStorageReady] = useState(false);
   const [view, setView] = useState("controltower");
+  const [operatingDate, setOperatingDate] = useState("2569-07-08");
   const [now, setNow] = useState(new Date());
-  const [orders, setOrders] = useState(genOrders());
+  const [orders, setOrders] = useState(genOrders);
   const [trips, setTrips] = useState(TRIPS_INIT);
   const [log, setLog] = useState([{ t: new Date(), text: "เชื่อมต่อกับ WMS สำเร็จ — ดึงข้อมูล Order เดือนกรกฎาคม 2569" }]);
   const [lastSync, setLastSync] = useState(new Date());
   const [online, setOnline] = useState(true);
-  const [shipments, setShipments] = useState(() => genShipments(genOrders()));
+  const [shipments, setShipments] = useState(() => genShipments(orders));
   const [slots, setSlots] = useState(SLOTS_INIT);
   const [pods, setPods] = useState(PODS_INIT);
   const [returns, setReturns] = useState(RETURNS_INIT);
@@ -878,16 +905,31 @@ export default function App() {
   const [invoices, setInvoices] = useState(() => genInvoices(TRIPS_INIT));
 
   useEffect(() => { const t = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    const saved = loadLocalState();
+    if (saved) {
+      if (saved.orders) setOrders(saved.orders);
+      if (saved.trips) setTrips(saved.trips);
+      if (saved.shipments) setShipments(saved.shipments);
+      if (saved.pods) setPods(saved.pods);
+      if (saved.returns) setReturns(saved.returns);
+      if (saved.invoices) setInvoices(saved.invoices);
+    }
+    setStorageReady(true);
+  }, []);
+  useEffect(() => {
+    if (!storageReady) return;
+    try { window.localStorage.setItem("pandora-tms-linked-v2", JSON.stringify({ orders, trips, shipments, pods, returns, invoices })); } catch { /* storage may be unavailable in private mode */ }
+  }, [storageReady, orders, trips, shipments, pods, returns, invoices]);
 
   const addLog = (text) => setLog((l) => [{ t: new Date(), text }, ...l].slice(0, 30));
 
   const syncNow = () => {
-    setOrders(genOrders());
     setLastSync(new Date());
-    addLog("Sync ข้อมูล Order จาก WMS สำเร็จ — อัปเดตล่าสุด");
+    addLog("Sync ข้อมูล Order จาก WMS สำเร็จ — รักษาเลข Order และสถานะการจัดรถที่เชื่อมโยงไว้ครบถ้วน");
   };
 
-  const ctx = { orders, trips, setTrips, addLog, shipments, setShipments, slots, setSlots, pods, setPods, returns, setReturns, vehicles, drivers, invoices, setInvoices, setView };
+  const ctx = { orders, setOrders, trips, setTrips, addLog, shipments, setShipments, slots, setSlots, pods, setPods, returns, setReturns, vehicles, drivers, invoices, setInvoices, setView, operatingDate, setOperatingDate };
   const flatNav = NAV.flatMap((g) => g.items);
   const currentTitle = flatNav.find((n) => n.id === view)?.label;
 
@@ -942,8 +984,9 @@ export default function App() {
           </div>
         </div>
         <div className="content">
+          {["sync", "simulation", "manualdispatch", "allocation", "shipments", "track", "driverapp", "pod"].includes(view) && <WorkflowRail {...ctx} />}
           {view === "controltower" && <TmsControlTower trips={trips} vehicles={vehicles} setView={setView} />}
-          {view === "dashboard" && <TmsDashboard trips={trips} log={log} vehicles={vehicles} />}
+          {view === "dashboard" && <TmsDashboard trips={trips} orders={orders} log={log} vehicles={vehicles} />}
           {view === "sync" && <TmsSync orders={orders} online={online} lastSync={lastSync} syncNow={syncNow} />}
           {view === "shipments" && <TmsShipments {...ctx} />}
           {view === "slots" && <TmsSlots {...ctx} />}
@@ -966,6 +1009,33 @@ export default function App() {
         </div>
       </div>
     </div>
+  );
+}
+
+function WorkflowRail({ orders, trips, shipments, setView, operatingDate, setOperatingDate }) {
+  const dayOrders = orders.filter((order) => order.date === operatingDate);
+  const dayTrips = trips.filter((trip) => trip.date === operatingDate && trip.orderIds?.length);
+  const allocated = new Set(dayTrips.flatMap((trip) => trip.orderIds));
+  const assigned = dayTrips.filter((trip) => trip.carrier).length;
+  const active = dayTrips.filter((trip) => ["Confirmed", "In Transit", "Dispatched"].includes(trip.status)).length;
+  const delivered = dayTrips.filter((trip) => trip.status === "Delivered").length;
+  const steps = [
+    { view: "sync", label: "1. Order จาก WMS", value: dayOrders.length, note: "รายการ" },
+    { view: "manualdispatch", label: "2. วางแผนและจัดกลุ่ม", value: allocated.size, note: `จาก ${dayOrders.length}` },
+    { view: "allocation", label: "3. จัดรถ/Carrier", value: assigned, note: "เที่ยว" },
+    { view: "track", label: "4. กำลังขนส่ง", value: active, note: "เที่ยว" },
+    { view: "pod", label: "5. ส่งมอบ/POD", value: delivered, note: "เที่ยว" },
+  ];
+  return (
+    <section className="workflow-rail" aria-label="ลำดับงานขนส่งที่เชื่อมโยงกัน">
+      <div className="workflow-head">
+        <div><b>Transportation workflow</b><span>ข้อมูล Order, เที่ยวรถ และสถานะใช้ชุดเดียวกันทุกหน้า</span></div>
+        <label>วันที่ทำงาน <input value={operatingDate} onChange={(event) => setOperatingDate(event.target.value)} /></label>
+      </div>
+      <div className="workflow-steps">
+        {steps.map((step, index) => <React.Fragment key={step.view}><button onClick={() => setView(step.view)}><span>{step.label}</span><b>{step.value}</b><small>{step.note}</small></button>{index < steps.length - 1 && <i>→</i>}</React.Fragment>)}
+      </div>
+    </section>
   );
 }
 
@@ -1078,7 +1148,91 @@ function TmsControlTower({ trips, vehicles, setView }) {
   );
 }
 
-function TmsDashboard({ trips, log, vehicles }) {
+function TmsDashboard({ trips, orders, log, vehicles }) {
+  const allMonths = [...new Set(trips.map((trip) => trip.date.slice(0, 7)))].sort();
+  const [month, setMonth] = useState(allMonths.at(-1) || "all");
+  const filtered = month === "all" ? trips : trips.filter((trip) => trip.date.startsWith(month));
+  const byDate = {};
+  filtered.forEach((trip) => {
+    if (!byDate[trip.date]) byDate[trip.date] = { date: trip.date, trips: 0, orders: 0, cube: 0, cost: 0, ftl: 0, parcel: 0, lowFill: 0, routes: new Set() };
+    const day = byDate[trip.date];
+    day.trips += 1; day.orders += trip.orders; day.cube += trip.cube; day.cost += trip.cost; day.routes.add(trip.route);
+    day[trip.mode === "FTL" ? "ftl" : "parcel"] += 1;
+    if (trip.mode === "FTL" && trip.cube < 5.2) day.lowFill += 1;
+  });
+  const daily = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date)).map((day) => ({
+    ...day,
+    avgCube: day.orders ? day.cube / day.orders : 0,
+    costPerOrder: day.orders ? day.cost / day.orders : 0,
+    utilization: day.ftl ? Math.min(100, day.cube / (day.ftl * 32) * 100) : 100,
+    routeCount: day.routes.size,
+  }));
+  const today = daily.at(-1) || { date: "-", trips: 0, orders: 0, cube: 0, cost: 0, ftl: 0, parcel: 0, lowFill: 0, avgCube: 0, costPerOrder: 0, utilization: 0, routeCount: 0 };
+  const yesterday = daily.at(-2) || today;
+  const pct = (current, previous) => previous ? ((current - previous) / previous) * 100 : 0;
+  const costDelta = pct(today.cost, yesterday.cost);
+  const orderDelta = pct(today.orders, yesterday.orders);
+  const unitDelta = pct(today.costPerOrder, yesterday.costPerOrder);
+  const cubeDelta = pct(today.avgCube, yesterday.avgCube);
+  const totalCost = filtered.reduce((sum, trip) => sum + trip.cost, 0);
+  const totalOrders = filtered.reduce((sum, trip) => sum + trip.orders, 0);
+  const trendData = daily.slice(-14).map((day) => ({ date: day.date.slice(-5), cost: day.cost }));
+  const causes = [
+    { level: cubeDelta > 8 ? "bad" : "good", title: `ขนาดสินค้าต่อ Order ${cubeDelta >= 0 ? "เพิ่ม" : "ลด"} ${Math.abs(cubeDelta).toFixed(1)}%`, detail: `วันนี้เฉลี่ย ${today.avgCube.toFixed(2)} CBM/Order เทียบเมื่อวาน ${yesterday.avgCube.toFixed(2)} CBM — สินค้าชิ้นใหญ่ทำให้ใช้พื้นที่รถเร็วขึ้น` },
+    { level: today.lowFill > yesterday.lowFill ? "bad" : "good", title: `รถวิ่งไม่เต็มเที่ยว ${today.lowFill} เที่ยว`, detail: today.lowFill ? `มี ${today.lowFill} เที่ยวที่ใช้พื้นที่ต่ำกว่าเกณฑ์ 65% ควรรวม Order หรือเลื่อน Cut-off` : "ไม่พบรถเสริมที่วิ่งต่ำกว่าเกณฑ์วันนี้" },
+    { level: today.routeCount > yesterday.routeCount ? "bad" : "good", title: `แยกวิ่ง ${today.routeCount} เส้นทาง`, detail: `เมื่อวาน ${yesterday.routeCount} เส้นทาง · จำนวนเส้นทางที่มากขึ้นเพิ่มค่ารถขั้นต่ำและระยะทางเปล่า` },
+    { level: unitDelta > 0 ? "bad" : "good", title: `ต้นทุนต่อ Order ${unitDelta >= 0 ? "สูงขึ้น" : "ลดลง"} ${Math.abs(unitDelta).toFixed(1)}%`, detail: `฿${Math.round(today.costPerOrder).toLocaleString()} ต่อ Order · ใช้ตัวเลขนี้แยกผลของปริมาณ Order ออกจากประสิทธิภาพการจัดรถ` },
+  ];
+  const byRoute = {};
+  filtered.forEach((trip) => {
+    if (!byRoute[trip.route]) byRoute[trip.route] = { trips: 0, orders: 0, cube: 0, cost: 0 };
+    const row = byRoute[trip.route]; row.trips += 1; row.orders += trip.orders; row.cube += trip.cube; row.cost += trip.cost;
+  });
+  const routeRows = Object.entries(byRoute).sort((a, b) => b[1].cost - a[1].cost);
+  const routeData = routeRows.map(([name, row]) => ({ name, cost: row.cost }));
+  const byCarrier = {};
+  filtered.forEach((trip) => { if (!byCarrier[trip.carrier]) byCarrier[trip.carrier] = { trips: 0, orders: 0, cost: 0 }; byCarrier[trip.carrier].trips += 1; byCarrier[trip.carrier].orders += trip.orders; byCarrier[trip.carrier].cost += trip.cost; });
+  const carrierRows = Object.entries(byCarrier);
+  const carrierPie = carrierRows.map(([carrier, row]) => ({ name: vendorName(carrier), value: row.cost }));
+
+  return (
+    <div className="analytics-page">
+      <div className="analytics-toolbar">
+        <div><span>REPORT &amp; DASHBOARD</span><h2>ต้นทุนขนส่งและสาเหตุที่เปลี่ยนแปลง</h2></div>
+        <label>ช่วงข้อมูล <select value={month} onChange={(event) => setMonth(event.target.value)}><option value="all">ทั้งหมด</option>{allMonths.map((item) => <option key={item}>{item}</option>)}</select></label>
+      </div>
+
+      <section className={`cost-story ${costDelta > 0 ? "negative" : "positive"}`}>
+        <div><span>ต้นทุนวันนี้ · {today.date}</span><strong>฿{today.cost.toLocaleString()}</strong><small className={costDelta > 0 ? "up" : "down"}>{costDelta >= 0 ? "↑" : "↓"} {Math.abs(costDelta).toFixed(1)}% จากเมื่อวาน</small></div>
+        <div className="story-copy"><b>{costDelta > 0 ? "วันนี้ต้นทุนแพงขึ้น" : "วันนี้ต้นทุนถูกลง"} แม้จำนวน Order {orderDelta >= 0 ? "เพิ่ม" : "ลด"} {Math.abs(orderDelta).toFixed(1)}%</b><p>ตัวชี้วัดหลักคือ ต้นทุนต่อ Order {unitDelta >= 0 ? "เพิ่ม" : "ลด"} {Math.abs(unitDelta).toFixed(1)}% โดยมีผลจากขนาดสินค้าเฉลี่ย, รถที่วิ่งไม่เต็มเที่ยว และจำนวนเส้นทางด้านล่าง</p></div>
+      </section>
+
+      <div className="insight-kpis">
+        <article><span>Order วันนี้</span><b>{today.orders}</b><small className={orderDelta >= 0 ? "up" : "down"}>{orderDelta >= 0 ? "+" : ""}{orderDelta.toFixed(1)}%</small></article>
+        <article><span>ต้นทุน / Order</span><b>฿{Math.round(today.costPerOrder).toLocaleString()}</b><small className={unitDelta > 0 ? "up" : "down"}>{unitDelta >= 0 ? "+" : ""}{unitDelta.toFixed(1)}%</small></article>
+        <article><span>Cube / Order</span><b>{today.avgCube.toFixed(2)}</b><small>CBM · {cubeDelta >= 0 ? "+" : ""}{cubeDelta.toFixed(1)}%</small></article>
+        <article><span>เที่ยว / เส้นทาง</span><b>{today.trips} / {today.routeCount}</b><small>รถไม่เต็ม {today.lowFill} เที่ยว</small></article>
+      </div>
+
+      <div className="analytics-grid">
+        <section className="analytics-card chart-card"><div className="analytics-card-head"><div><span>DAILY COST TREND</span><h3>แนวโน้มต้นทุนขนส่ง 14 วัน</h3></div><b>รวม ฿{totalCost.toLocaleString()}</b></div><div className="chart-frame"><ResponsiveContainer><LineChart data={trendData}><XAxis dataKey="date" /><YAxis /><Tooltip /><Line dataKey="cost" name="ต้นทุนรวม" stroke="#3E7EE0" strokeWidth={3} /></LineChart></ResponsiveContainer></div></section>
+        <section className="analytics-card"><div className="analytics-card-head"><div><span>WHY IT CHANGED</span><h3>สาเหตุที่ต้นทุนเปลี่ยนวันนี้</h3></div></div><div className="cause-list">{causes.map((cause) => <article className={cause.level} key={cause.title}><i>{cause.level === "bad" ? "!" : "✓"}</i><div><b>{cause.title}</b><p>{cause.detail}</p></div></article>)}</div></section>
+      </div>
+
+      <section className="analytics-card"><div className="analytics-card-head"><div><span>DAILY DIAGNOSTIC</span><h3>ดูต้นทุนพร้อมปริมาณและประสิทธิภาพรถ</h3></div></div><div className="table-wrap"><table><thead><tr><th>วันที่</th><th>Order</th><th>Cube/Order</th><th>เที่ยว</th><th>เส้นทาง</th><th>รถไม่เต็ม</th><th>ต้นทุนรวม</th><th>ต้นทุน/Order</th></tr></thead><tbody>{daily.slice(-14).reverse().map((day) => <tr key={day.date}><td className="mono">{day.date}</td><td>{day.orders}</td><td>{day.avgCube.toFixed(2)} CBM</td><td>{day.trips}</td><td>{day.routeCount}</td><td className={day.lowFill ? "metric-bad" : "metric-good"}>{day.lowFill}</td><td className="mono">฿{day.cost.toLocaleString()}</td><td className="mono">฿{Math.round(day.costPerOrder).toLocaleString()}</td></tr>)}</tbody></table></div></section>
+
+      <div className="analytics-grid">
+        <section className="analytics-card chart-card"><div className="analytics-card-head"><div><span>ROUTE COST</span><h3>เส้นทางที่ใช้ต้นทุนสูง</h3></div></div><div className="chart-frame"><ResponsiveContainer><BarChart data={routeData.slice(0, 6)} layout="vertical"><YAxis dataKey="name" /><XAxis /><Bar dataKey="cost" fill="#17A9C0" /></BarChart></ResponsiveContainer></div></section>
+        <section className="analytics-card chart-card"><div className="analytics-card-head"><div><span>CARRIER MIX</span><h3>สัดส่วนต้นทุนผู้ให้บริการ</h3></div></div><div className="chart-frame"><ResponsiveContainer><PieChart><Pie data={carrierPie} dataKey="value" nameKey="name">{carrierPie.map((_, index) => <Cell key={index} fill={["#3E7EE0", "#17A9C0", "#3EC775", "#F5A83C"][index % 4]} />)}</Pie></PieChart></ResponsiveContainer></div></section>
+      </div>
+
+      <section className="analytics-card"><div className="analytics-card-head"><div><span>ACTION TABLE</span><h3>เส้นทางที่ควรทบทวนก่อน Cut-off รอบถัดไป</h3></div></div><div className="table-wrap"><table><thead><tr><th>เส้นทาง</th><th>เที่ยว</th><th>Order</th><th>Cube รวม</th><th>ต้นทุนรวม</th><th>ต้นทุน/Order</th><th>ข้อสังเกต</th></tr></thead><tbody>{routeRows.map(([route, row]) => <tr key={route}><td>{route}</td><td>{row.trips}</td><td>{row.orders}</td><td>{row.cube.toFixed(1)}</td><td className="mono">฿{row.cost.toLocaleString()}</td><td className="mono">฿{Math.round(row.cost / Math.max(1, row.orders)).toLocaleString()}</td><td>{row.cube / Math.max(1, row.trips) < 5.2 ? <span className="analysis-tag warn">รวมเที่ยวเพิ่ม</span> : <span className="analysis-tag ok">โหลดเหมาะสม</span>}</td></tr>)}</tbody></table></div></section>
+      <div className="analytics-footnote">ข้อมูลเชื่อมจาก {filtered.length} เที่ยว · {totalOrders.toLocaleString()} Order · อัปเดตตามการจัดรถและสถานะในระบบ</div>
+    </div>
+  );
+}
+
+function TmsDashboardLegacy({ trips, log, vehicles }) {
   const allMonths = [...new Set(trips.map((t) => t.date.slice(0, 7)))].sort();
   const [month, setMonth] = useState("all");
   const filtered = month === "all" ? trips : trips.filter((t) => t.date.slice(0, 7) === month);
@@ -1267,8 +1421,7 @@ function TmsDashboard({ trips, log, vehicles }) {
 /* WMS SYNC / ORDER INTAKE                                              */
 /* ================================================================== */
 
-function TmsSync({ orders, online, lastSync, syncNow }) {
-  const [date, setDate] = useState("2569-07-08");
+function TmsSync({ orders, online, lastSync, syncNow, operatingDate: date, setOperatingDate: setDate }) {
   const days = [...new Set(orders.map((o) => o.date))].sort();
   const filtered = orders.filter((o) => o.date === date);
   const totalCube = filtered.reduce((a, o) => a + o.cube, 0);
@@ -1315,13 +1468,13 @@ function TmsSync({ orders, online, lastSync, syncNow }) {
 /* ROUTE SIMULATION & BOOKING                                          */
 /* ================================================================== */
 
-function TmsSimulation({ orders, trips, setTrips, addLog, vehicles, setView }) {
-  const [date, setDate] = useState("2569-07-08");
+function TmsSimulation({ orders, setOrders, trips, setTrips, shipments, setShipments, addLog, vehicles, setView, operatingDate: date, setOperatingDate: setDate }) {
   const [route, setRoute] = useState(AREAS[0]);
   const [dispatchModal, setDispatchModal] = useState(null);
   const [justBooked, setJustBooked] = useState(null);
 
-  const dayOrders = orders.filter((o) => o.date === date && o.area === route);
+  const assignedOrderIds = new Set(trips.filter((trip) => trip.date === date).flatMap((trip) => trip.orderIds || []));
+  const dayOrders = orders.filter((o) => o.date === date && o.area === route && !assignedOrderIds.has(o.id));
   const sim = dayOrders.length ? simulateRoute(dayOrders, route) : null;
   const openAutoDispatch = (initialMode) => {
     if (!sim) return;
@@ -1329,7 +1482,7 @@ function TmsSimulation({ orders, trips, setTrips, addLog, vehicles, setView }) {
   };
   const doBooking = (mode, vendor) => {
     if (!dispatchModal) return;
-    const result = bookDispatch({ ev: dispatchModal.ev, mode, vendor, date, route: dispatchModal.route, isManual: dispatchModal.isManual, trips, setTrips, vehicles, addLog });
+    const result = bookDispatch({ ev: dispatchModal.ev, mode, vendor, date, route: dispatchModal.route, isManual: dispatchModal.isManual, trips, setTrips, setOrders, setShipments, vehicles, addLog });
     setJustBooked(result);
     setDispatchModal(null);
   };
@@ -1338,6 +1491,10 @@ function TmsSimulation({ orders, trips, setTrips, addLog, vehicles, setView }) {
     const next = flow[flow.indexOf(trip.status) + 1];
     if (!next) return;
     setTrips((list) => list.map((t) => (t.id === trip.id ? { ...t, status: next } : t)));
+    const shipmentStatus = next === "Confirmed" ? "Carrier Assigned" : next === "In Transit" ? "In-Transit" : next;
+    const orderStatus = next === "Delivered" ? "สำเร็จ" : next === "In Transit" ? "กำลังจัดส่ง" : "จัดรถแล้ว";
+    setShipments((list) => list.map((shipment) => shipment.tripId === trip.id ? { ...shipment, status: shipmentStatus } : shipment));
+    setOrders((list) => list.map((order) => trip.orderIds?.includes(order.id) ? { ...order, status: orderStatus } : order));
   };
   const todayTrips = trips.filter((t) => t.date === date);
 
@@ -1355,7 +1512,7 @@ function TmsSimulation({ orders, trips, setTrips, addLog, vehicles, setView }) {
           <thead><tr><th>เส้นทาง</th><th>จำนวน Order</th><th>Cube รวม</th><th>Cube เฉลี่ย/Order</th><th>แนวโน้ม</th></tr></thead>
           <tbody>
             {AREAS.map((a) => {
-              const os = orders.filter((o) => o.date === date && o.area === a);
+              const os = orders.filter((o) => o.date === date && o.area === a && !assignedOrderIds.has(o.id));
               const totalCube = os.reduce((s, o) => s + o.cube, 0);
               const avgCube = os.length ? totalCube / os.length : 0;
               return (
@@ -1478,8 +1635,7 @@ function TmsSimulation({ orders, trips, setTrips, addLog, vehicles, setView }) {
 /* route-divergence detection (e.g. North mixed into a South run)       */
 /* ================================================================== */
 
-function TmsManualDispatch({ orders, trips, setTrips, addLog, vehicles, setView }) {
-  const [date, setDate] = useState("2569-07-08");
+function TmsManualDispatch({ orders, setOrders, trips, setTrips, setShipments, addLog, vehicles, setView, operatingDate: date, setOperatingDate: setDate }) {
   const [manualRoutes, setManualRoutes] = useState([]);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [dispatchModal, setDispatchModal] = useState(null);
@@ -1517,7 +1673,7 @@ function TmsManualDispatch({ orders, trips, setTrips, addLog, vehicles, setView 
   };
   const doBooking = (mode, vendor) => {
     if (!dispatchModal) return;
-    const result = bookDispatch({ ev: dispatchModal.ev, mode, vendor, date, route: dispatchModal.route, isManual: dispatchModal.isManual, trips, setTrips, vehicles, addLog });
+    const result = bookDispatch({ ev: dispatchModal.ev, mode, vendor, date, route: dispatchModal.route, isManual: dispatchModal.isManual, trips, setTrips, setOrders, setShipments, vehicles, addLog });
     setJustBooked(result);
     setDispatchModal(null);
     setSelectedIds(new Set());
@@ -1886,13 +2042,20 @@ function TmsCarrierMaster() {
 /* 3.1 SHIPMENT MANAGEMENT — lifecycle, consolidation, split            */
 /* ================================================================== */
 
-function TmsShipments({ shipments, setShipments }) {
+function TmsShipments({ shipments, setShipments, setOrders, setTrips }) {
   const [filter, setFilter] = useState("all");
   const advance = (s) => {
     const idx = SHIPMENT_STATUSES.indexOf(s.status);
     const next = SHIPMENT_STATUSES[idx + 1];
     if (!next || next === "Exception") return;
+    if (next === "Carrier Assigned" && !s.tripId) return;
     setShipments((list) => list.map((x) => (x.id === s.id ? { ...x, status: next } : x)));
+    const orderStatus = next === "Delivered" ? "สำเร็จ" : ["Dispatched", "In-Transit"].includes(next) ? "กำลังจัดส่ง" : next === "Carrier Assigned" ? "จัดรถแล้ว" : "รอจัดสรร";
+    setOrders((list) => list.map((order) => order.id === s.orderId ? { ...order, status: orderStatus, tripId: s.tripId } : order));
+    if (s.tripId) {
+      const tripStatus = next === "Delivered" ? "Delivered" : next === "In-Transit" ? "In Transit" : next === "Dispatched" ? "Confirmed" : next === "Carrier Assigned" ? "Confirmed" : "Requested";
+      setTrips((list) => list.map((trip) => trip.id === s.tripId ? { ...trip, status: tripStatus } : trip));
+    }
   };
   const filtered = filter === "all" ? shipments : shipments.filter((s) => s.status === filter);
   const counts = SHIPMENT_STATUSES.map((st) => ({ st, n: shipments.filter((s) => s.status === st).length }));
@@ -1910,17 +2073,17 @@ function TmsShipments({ shipments, setShipments }) {
       <div style={{ marginBottom: 12 }}><span className="chip active" onClick={() => setFilter("all")}>แสดงทั้งหมด</span></div>
       <div className="table-wrap">
         <table>
-          <thead><tr><th>Shipment</th><th>Order</th><th>ลูกค้า</th><th>ปลายทาง</th><th>Service Type</th><th>Carrier</th><th>Priority</th><th>สถานะ</th><th></th></tr></thead>
+          <thead><tr><th>Shipment</th><th>Order</th><th>Trip / รถ</th><th>ลูกค้า</th><th>ปลายทาง</th><th>Service Type</th><th>Carrier</th><th>Priority</th><th>สถานะ</th><th></th></tr></thead>
           <tbody>
             {filtered.map((s) => (
               <tr key={s.id}>
                 <td className="mono">{s.id}{s.consolidated && <span className="sys-tag ASRS" style={{ marginLeft: 6 }}>Consolidated</span>}{s.split && <span className="sys-tag Manual" style={{ marginLeft: 6 }}>Split</span>}</td>
-                <td className="mono">{s.orderId}</td><td>{s.customer}</td><td>{s.area}</td>
+                <td className="mono">{s.orderId}</td><td className="mono">{s.tripId || "ยังไม่จัดรถ"}{s.vehicleId && <small style={{ display: "block" }}>{s.vehicleId}</small>}</td><td>{s.customer}</td><td>{s.area}</td>
                 <td>{SERVICE_TYPES.find((t) => t.id === s.serviceType)?.name.split(" — ")[0] || s.serviceType}</td>
                 <td>{vendorName(s.carrier)}</td>
                 <td>{s.priority === "VIP" ? <span className="tag-status Hold">VIP</span> : "Normal"}</td>
                 <td><span className={`tag-status ${s.status === "Delivered" ? "Arrived" : s.status === "Exception" ? "Hold" : s.status === "In-Transit" || s.status === "Dispatched" ? "Receiving" : "Booked"}`}>{s.status}</span></td>
-                <td>{s.status !== "Delivered" && s.status !== "Exception" && <button className="btn secondary" onClick={() => advance(s)}>ขั้นต่อไป</button>}</td>
+                <td>{s.status !== "Delivered" && s.status !== "Exception" && <button className="btn secondary" disabled={s.status === "Planned" && !s.tripId} onClick={() => advance(s)}>{s.status === "Planned" && !s.tripId ? "รอจัดรถ" : "ขั้นต่อไป"}</button>}</td>
               </tr>
             ))}
           </tbody>
@@ -1981,8 +2144,7 @@ function TmsSlots({ slots, setSlots }) {
 /* ORDER → VEHICLE/TRIP ALLOCATION BOARD                                */
 /* ================================================================== */
 
-function TmsAllocationBoard({ trips, vehicles, orders }) {
-  const [date, setDate] = useState("2569-07-08");
+function TmsAllocationBoard({ trips, vehicles, orders, setView, operatingDate: date, setOperatingDate: setDate }) {
   const dayTrips = trips.filter((t) => t.date === date);
   const withDetail = dayTrips.filter((t) => t.orderDetails);
   const withoutDetail = dayTrips.filter((t) => !t.orderDetails);
@@ -2059,7 +2221,7 @@ function TmsAllocationBoard({ trips, vehicles, orders }) {
         </>
       )}
 
-      <div className="section-title">Order ที่ยังไม่ถูกจัดสรรเข้ารถ/เที่ยวใด</div>
+      <div className="section-title action-title"><span>Order ที่ยังไม่ถูกจัดสรรเข้ารถ/เที่ยวใด</span>{unallocated.length > 0 && <button className="btn" onClick={() => setView("manualdispatch")}><Truck size={13} /> ไปจัดรถ {unallocated.length} Order</button>}</div>
       {unallocated.length === 0 ? (
         <div className="card kpi-sub" style={{ textAlign: "center", padding: 20, color: "var(--success)" }}>✓ Order ทั้งหมดถูกจัดสรรครบแล้ว</div>
       ) : (
@@ -2423,7 +2585,7 @@ function TmsPOD({ pods }) {
 /* failed/return with photo + reason, bounces back to the main system   */
 /* ================================================================== */
 
-function TmsDriverApp({ trips, setTrips, setPods, setReturns, addLog }) {
+function TmsDriverApp({ trips, setTrips, setOrders, setShipments, setPods, setReturns, addLog }) {
   const [scanning, setScanning] = useState(false);
   const [acceptedIds, setAcceptedIds] = useState(new Set());
   const [activeJob, setActiveJob] = useState(null);
@@ -2442,13 +2604,20 @@ function TmsDriverApp({ trips, setTrips, setPods, setReturns, addLog }) {
     setTimeout(() => {
       setScanning(false);
       const next = unclaimed[0];
-      if (next) { setAcceptedIds((s) => new Set([...s, next.id])); addLog(`[Driver App] รับงาน ${next.id} ผ่าน QR Code`); }
+      if (next) {
+        setAcceptedIds((s) => new Set([...s, next.id]));
+        setTrips((list) => list.map((trip) => trip.id === next.id ? { ...trip, status: "Confirmed" } : trip));
+        setShipments((list) => list.map((shipment) => shipment.tripId === next.id ? { ...shipment, status: "Dispatched" } : shipment));
+        addLog(`[Driver App] รับงาน ${next.id} ผ่าน QR Code`);
+      }
     }, 1100);
   };
 
   const markDelivered = () => {
     if (!activeJob) return;
     setTrips((list) => list.map((t) => (t.id === activeJob.id ? { ...t, status: "Delivered" } : t)));
+    setShipments((list) => list.map((shipment) => shipment.tripId === activeJob.id ? { ...shipment, status: "Delivered" } : shipment));
+    setOrders((list) => list.map((order) => activeJob.orderIds?.includes(order.id) ? { ...order, status: "สำเร็จ" } : order));
     setPods((list) => [{ id: `POD-${rand(8000, 8999)}`, shipmentId: activeJob.id, delivered: true, receiver: receiver || "ลูกค้าปลายทาง", reason: "-", podTimeMin: rand(2, 25), timestamp: "เมื่อสักครู่" }, ...list]);
     addLog(`[Driver App] ${activeJob.id} ส่งถึงลูกค้าแล้ว — ยืนยันกลับระบบสำเร็จ`);
     setResult({ ok: true, id: activeJob.id });
@@ -2458,6 +2627,8 @@ function TmsDriverApp({ trips, setTrips, setPods, setReturns, addLog }) {
   const markFailed = () => {
     if (!activeJob) return;
     setTrips((list) => list.map((t) => (t.id === activeJob.id ? { ...t, status: "Exception" } : t)));
+    setShipments((list) => list.map((shipment) => shipment.tripId === activeJob.id ? { ...shipment, status: "Exception" } : shipment));
+    setOrders((list) => list.map((order) => activeJob.orderIds?.includes(order.id) ? { ...order, status: "ส่งไม่สำเร็จ" } : order));
     setPods((list) => [{ id: `POD-${rand(8000, 8999)}`, shipmentId: activeJob.id, delivered: false, receiver: "-", reason, podTimeMin: null, timestamp: "เมื่อสักครู่" }, ...list]);
     setReturns((list) => [{ id: `RET-${rand(3900, 3999)}`, type: "REFUSED", typeName: "Refused Delivery", carrier: activeJob.carrier, area: activeJob.route, cost: rand(80, 320), resolutionHours: rand(6, 48), status: "รับเรื่อง", claimStatus: "-" }, ...list]);
     addLog(`[Driver App] ${activeJob.id} ส่งไม่สำเร็จ (${reason}) — สร้าง Return Job อัตโนมัติแล้ว`);
@@ -2635,7 +2806,78 @@ function TmsScorecard() {
 /* 6. OTIF & KPI DASHBOARD                                              */
 /* ================================================================== */
 
-function TmsOtifDashboard({ trips }) {
+function OtifTrendCard({ title, value, color, dataKey, data, target }) {
+  const current = data.at(-1)?.[dataKey] || 0;
+  return <section className="otif-trend-card"><div className="otif-card-head"><div><span>{title}</span><small>เป้าหมาย {target}%</small></div><strong style={{ color }}>{value}</strong></div><div className="mini-chart"><ResponsiveContainer><LineChart data={data}><XAxis dataKey="date" /><YAxis domain={[Math.max(70, Math.floor(Math.min(...data.map((row) => row[dataKey])) - 3)), 100]} /><ReferenceLine y={target} stroke="#94A3B8" label={{ value: `เป้า ${target}%` }} /><Line dataKey={dataKey} name={title} stroke={color} strokeWidth={3} /></LineChart></ResponsiveContainer></div><div className={`otif-result ${current >= target ? "pass" : "fail"}`}>{current >= target ? "ผ่านเป้าหมาย" : `ต่ำกว่าเป้าหมาย ${(target - current).toFixed(2)} จุด`}</div></section>;
+}
+
+function TmsOtifDashboard({ trips, shipments, pods, returns }) {
+  const trend = [
+    { date: "07-02", whOn: 99.8, whFull: 94.1, logOn: 96.2, logFull: 95.0 },
+    { date: "07-03", whOn: 100, whFull: 97.8, logOn: 93.4, logFull: 87.8 },
+    { date: "07-04", whOn: 99.9, whFull: 89.6, logOn: 90.8, logFull: 99.2 },
+    { date: "07-05", whOn: 100, whFull: 95.8, logOn: 97.3, logFull: 99.0 },
+    { date: "07-06", whOn: 99.8, whFull: 93.7, logOn: 99.1, logFull: 89.4 },
+    { date: "07-07", whOn: 100, whFull: 90.2, logOn: 95.4, logFull: 95.7 },
+    { date: "07-08", whOn: 100, whFull: 93.18, logOn: 90.14, logFull: 90.98 },
+  ];
+  const current = trend.at(-1);
+  const prior = trend.at(-2);
+  const otif = Math.min(current.logOn, current.logFull);
+  const priorOtif = Math.min(prior.logOn, prior.logFull);
+  const activeExceptions = shipments.filter((shipment) => shipment.status === "Exception").length + returns.filter((item) => item.status !== "ปิดเคส").length;
+  const delivered = shipments.filter((shipment) => shipment.status === "Delivered").length;
+  const linkedPods = pods.filter((pod) => pod.delivered).length;
+  const podRate = delivered ? Math.min(100, linkedPods / delivered * 100) : 97.2;
+  const issueData = [
+    { name: "ส่งล่าช้า", value: 12 },
+    { name: "สินค้าไม่ครบ", value: 8 },
+    { name: "รถมารับช้า", value: 7 },
+    { name: "สินค้าเสียหาย", value: 5 },
+    { name: "ที่อยู่/เวลานัด", value: 4 },
+  ];
+  const serviceMix = [
+    { name: "On-time WH", value: current.whOn },
+    { name: "In-full WH", value: current.whFull },
+    { name: "On-time Carrier", value: current.logOn },
+    { name: "In-full Carrier", value: current.logFull },
+  ];
+  const explanations = [
+    { title: "On-time Carrier ลดลง 5.26 จุด", detail: "เที่ยวเสริมและการแยกเส้นทางมากขึ้นทำให้ Carrier เข้ารับและส่งปลายทางไม่ทัน SLA", level: "bad" },
+    { title: "In-full Carrier ลดลง 4.72 จุด", detail: "พบปัญหาสินค้าไม่ครบและโหลดแยกเที่ยว ควรตรวจ Consolidation ก่อนปล่อยรถ", level: "bad" },
+    { title: "Warehouse On-time คงที่ 100%", detail: "คลังเตรียมสินค้าและส่งมอบให้จุดโหลดได้ตาม Cut-off ปัญหาหลักจึงอยู่หลังออกจากคลัง", level: "good" },
+  ];
+  return (
+    <div className="analytics-page otif-page">
+      <div className="analytics-toolbar"><div><span>OTIF &amp; KPI DASHBOARD</span><h2>Warehouse &amp; Logistics Service Level</h2><p>แยกให้เห็นว่าปัญหาเกิดในคลังหรือระหว่างขนส่ง และต้องแก้ที่จุดใด</p></div><div className={`overall-otif ${otif >= 97 ? "pass" : "fail"}`}><span>OTIF วันนี้</span><b>{otif.toFixed(2)}%</b><small>{otif - priorOtif >= 0 ? "+" : ""}{(otif - priorOtif).toFixed(2)} จุดจากเมื่อวาน</small></div></div>
+
+      <div className="otif-trend-grid">
+        <OtifTrendCard title="On-time Warehouse" value={`${current.whOn.toFixed(2)}%`} color="#356DFF" dataKey="whOn" data={trend} target={99} />
+        <OtifTrendCard title="In-full Warehouse" value={`${current.whFull.toFixed(2)}%`} color="#19B969" dataKey="whFull" data={trend} target={95} />
+        <OtifTrendCard title="On-time Logistics" value={`${current.logOn.toFixed(2)}%`} color="#11AFC1" dataKey="logOn" data={trend} target={97} />
+        <OtifTrendCard title="In-full Logistics" value={`${current.logFull.toFixed(2)}%`} color="#FF9D0A" dataKey="logFull" data={trend} target={97} />
+      </div>
+
+      <section className="service-summary"><div className="analytics-card-head"><div><span>CUSTOMER SERVICE DASHBOARD</span><h3>ผลลัพธ์รวมจากคลังถึงลูกค้า</h3></div></div><div className="service-kpis">{serviceMix.map((item, index) => <article key={item.name} style={{ background: ["#356DFF", "#19B969", "#11AFC1", "#FF9D0A"][index] }}><span>{item.name}</span><b>{item.value.toFixed(2)}%</b><small>เป้าหมาย {index === 0 ? "99" : index === 1 ? "95" : "97"}%</small></article>)}</div><div className="combined-chart"><ResponsiveContainer><LineChart data={trend}><XAxis dataKey="date" /><YAxis domain={[80, 100]} /><ReferenceLine y={97} stroke="#64748B" label={{ value: "SLA 97%" }} /><Line dataKey="whOn" name="On-time WH" stroke="#356DFF" /><Line dataKey="whFull" name="In-full WH" stroke="#19B969" /><Line dataKey="logOn" name="On-time Carrier" stroke="#11AFC1" /><Line dataKey="logFull" name="In-full Carrier" stroke="#FF9D0A" /></LineChart></ResponsiveContainer></div></section>
+
+      <div className="analytics-grid">
+        <section className="analytics-card"><div className="analytics-card-head"><div><span>ROOT CAUSE</span><h3>ทำไม OTIF วันนี้ต่ำกว่าเป้าหมาย</h3></div></div><div className="cause-list">{explanations.map((item) => <article className={item.level} key={item.title}><i>{item.level === "bad" ? "!" : "✓"}</i><div><b>{item.title}</b><p>{item.detail}</p></div></article>)}</div></section>
+        <section className="analytics-card chart-card"><div className="analytics-card-head"><div><span>EXCEPTION PARETO</span><h3>จำนวนเคสแยกตามสาเหตุ</h3></div><b>{issueData.reduce((sum, item) => sum + item.value, 0)} เคส</b></div><div className="chart-frame"><ResponsiveContainer><BarChart data={issueData} layout="vertical"><YAxis dataKey="name" /><XAxis /><Bar dataKey="value" fill="#356DFF" /></BarChart></ResponsiveContainer></div></section>
+      </div>
+
+      <div className="otif-ops-grid">
+        <article><span>เที่ยวขนส่งในระบบ</span><b>{trips.length}</b><small>ข้อมูลเดียวกับ Dispatch</small></article>
+        <article><span>Open Exception</span><b className={activeExceptions ? "metric-bad" : "metric-good"}>{activeExceptions}</b><small>Shipment + Return</small></article>
+        <article><span>POD Completion</span><b>{podRate.toFixed(1)}%</b><small>เป้าหมาย ≥97%</small></article>
+        <article><span>Carrier SLA</span><b className="metric-bad">{current.logOn.toFixed(1)}%</b><small>ต่ำกว่าเป้า 97%</small></article>
+      </div>
+
+      <section className="analytics-card"><div className="analytics-card-head"><div><span>DAILY ACTION</span><h3>สิ่งที่ต้องทำก่อนรอบส่งถัดไป</h3></div></div><div className="action-list"><div><b>1</b><span><strong>รวม Order ก่อนเรียกรถเสริม</strong><small>ลดเที่ยวที่โหลดไม่เต็มและลดความเสี่ยงส่งล่าช้า</small></span></div><div><b>2</b><span><strong>ล็อก Route และ Cut-off ก่อนปล่อยคลัง</strong><small>ไม่เพิ่มจุดส่งหลัง Carrier รับงานแล้ว</small></span></div><div><b>3</b><span><strong>ตรวจจำนวนกล่องกับ Shipment ก่อนขึ้นรถ</strong><small>ลด In-full failure และเคสสินค้าไม่ครบ</small></span></div></div></section>
+    </div>
+  );
+}
+
+function TmsOtifDashboardLegacy({ trips }) {
   const execKpi = [
     { label: "OTIF Rate — Overall", value: "96.8%", target: "≥97%", ok: false },
     { label: "Transportation Cost / Unit", value: "฿148", target: "ลด ≥15% จาก Baseline", ok: true },
@@ -2659,7 +2901,7 @@ function TmsOtifDashboard({ trips }) {
   ];
   const trend = [...new Set(trips.map((t) => t.date))].sort().slice(-14).map((d) => ({
     date: d.slice(-5),
-    otif: +(94 + Math.random() * 5).toFixed(1),
+    otif: +(94 + random() * 5).toFixed(1),
   }));
 
   return (
@@ -3004,6 +3246,25 @@ function GlobalStyle() {
       .modal .close{float:right;cursor:pointer;color:var(--muted);} .modal h2{font-family:'Space Grotesk';margin:6px 0 16px;font-size:19px;color:var(--navy);}
       .handheld{background:#000;border:3px solid #333;border-radius:22px;padding:14px;box-shadow:0 0 0 6px var(--panel-raised), 0 4px 14px rgba(22,35,61,0.15);}
       .handheld-screen{background:var(--panel);border-radius:12px;padding:16px;min-height:400px;}
+      html,body,#root{height:100%;overflow:hidden;}
+      .wms-app{height:100dvh;min-height:0;overflow:hidden;border-radius:0;}
+      .wms-app .sidebar{height:100%;min-height:0;overscroll-behavior:contain;}
+      .wms-app .main{height:100%;min-height:0;overflow:hidden;}
+      .wms-app .content{min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;padding-bottom:96px;scrollbar-gutter:stable;}
+      .data-chart{display:block;width:100%;height:100%;overflow:visible;}
+      .workflow-rail{background:#fff;border:1px solid var(--border);border-radius:14px;padding:15px 18px;margin-bottom:20px;box-shadow:0 3px 12px rgba(22,35,61,.04);}
+      .workflow-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:12px;}
+      .workflow-head>div{display:flex;align-items:baseline;gap:10px}.workflow-head b{font:700 13px 'Space Grotesk';color:var(--navy)}.workflow-head span{font-size:12px;color:var(--muted)}
+      .workflow-head label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}.workflow-head input{width:112px;border:1px solid var(--border);border-radius:7px;padding:6px 8px;font:12px 'JetBrains Mono';color:var(--text);background:#F8FAFC}
+      .workflow-steps{display:grid;grid-template-columns:1fr auto 1fr auto 1fr auto 1fr auto 1fr;align-items:center;gap:8px}.workflow-steps>i{font-style:normal;color:#A7B2C2}.workflow-steps button{display:grid;grid-template-columns:1fr auto;gap:3px 8px;text-align:left;border:1px solid #E1E7EF;background:#F8FAFC;border-radius:10px;padding:10px 11px;color:var(--text);cursor:pointer}.workflow-steps button:hover{border-color:#7398D8;background:#F2F7FF}.workflow-steps span{font-size:12px;font-weight:600}.workflow-steps b{font:700 17px 'Space Grotesk';color:#356FCB;grid-row:1/3;grid-column:2}.workflow-steps small{font-size:10px;color:var(--muted)}
+      .action-title{display:flex;align-items:center;justify-content:space-between;gap:16px}.action-title .btn{font-family:'Sarabun';text-transform:none;letter-spacing:0}
+      .analytics-page{max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:18px}.analytics-toolbar{display:flex;align-items:flex-end;justify-content:space-between;gap:18px}.analytics-toolbar>div>span,.analytics-card-head span{font:700 10px 'Space Grotesk';letter-spacing:.13em;color:#8794A7}.analytics-toolbar h2{font:700 25px 'Space Grotesk';color:var(--navy);margin:5px 0 0}.analytics-toolbar p{font-size:13px;color:var(--muted);margin:6px 0 0}.analytics-toolbar label{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}.analytics-toolbar select{border:1px solid var(--border);background:#fff;border-radius:8px;padding:8px 10px;color:var(--text)}
+      .cost-story{display:grid;grid-template-columns:minmax(230px,.75fr) 2fr;gap:24px;align-items:center;padding:22px 24px;border-radius:15px;color:#fff;box-shadow:0 10px 26px rgba(22,35,61,.12)}.cost-story.negative{background:linear-gradient(120deg,#273651,#9F4052)}.cost-story.positive{background:linear-gradient(120deg,#173D54,#187D68)}.cost-story>div:first-child{border-right:1px solid rgba(255,255,255,.22)}.cost-story span{display:block;font-size:12px;color:rgba(255,255,255,.72)}.cost-story strong{display:block;font:700 34px 'Space Grotesk';margin:5px 0}.cost-story small{font-size:12px;font-weight:700}.story-copy b{font-size:18px}.story-copy p{font-size:13px;line-height:1.65;color:rgba(255,255,255,.78);margin:7px 0 0}.up{color:#F15B71!important}.down{color:#20B67A!important}.cost-story .up{color:#FFD6DC!important}.cost-story .down{color:#B8F5D8!important}
+      .insight-kpis,.otif-ops-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:13px}.insight-kpis article,.otif-ops-grid article{background:#fff;border:1px solid var(--border);border-radius:12px;padding:16px}.insight-kpis span,.otif-ops-grid span{display:block;font-size:12px;color:var(--muted)}.insight-kpis b,.otif-ops-grid b{font:700 23px 'Space Grotesk';color:var(--navy);display:block;margin:6px 0 3px}.insight-kpis small,.otif-ops-grid small{font-size:11px;color:var(--muted)}
+      .analytics-grid{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(340px,.75fr);gap:18px}.analytics-card,.service-summary{background:#fff;border:1px solid var(--border);border-radius:14px;overflow:hidden}.analytics-card-head{display:flex;justify-content:space-between;align-items:center;padding:17px 18px;border-bottom:1px solid #E7ECF2}.analytics-card-head h3{font-size:15px;color:var(--navy);margin:4px 0 0}.analytics-card-head>b{font:700 13px 'Space Grotesk';color:#356FCB}.chart-frame{height:290px;padding:10px 14px 14px}.cause-list{padding:12px 16px}.cause-list article{display:grid;grid-template-columns:32px 1fr;gap:11px;padding:12px 0;border-bottom:1px solid #EBEFF4}.cause-list article:last-child{border:0}.cause-list i{width:29px;height:29px;border-radius:9px;display:grid;place-items:center;font-style:normal;font-weight:800}.cause-list article.bad i{background:#FFF0F2;color:#D84F62}.cause-list article.good i{background:#EAF9F1;color:#249965}.cause-list b{font-size:13px}.cause-list p{font-size:12px;line-height:1.55;color:var(--muted);margin:3px 0 0}.metric-bad{color:#D84F62!important;font-weight:700}.metric-good{color:#249965!important;font-weight:700}.analysis-tag{display:inline-flex;border-radius:12px;padding:4px 8px;font-size:11px;font-weight:700}.analysis-tag.warn{background:#FFF2DF;color:#B96D14}.analysis-tag.ok{background:#EAF9F1;color:#24885B}.analytics-footnote{font-size:12px;color:var(--muted);text-align:right}
+      .overall-otif{min-width:190px;border-radius:13px;padding:14px 18px;color:#fff}.overall-otif.pass{background:#20A66B}.overall-otif.fail{background:#E15268}.overall-otif span,.overall-otif small{display:block;font-size:11px;color:rgba(255,255,255,.8)}.overall-otif b{display:block;font:700 28px 'Space Grotesk';margin:3px 0}.otif-trend-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}.otif-trend-card{background:#fff;border:1px solid var(--border);border-radius:14px;padding:16px;overflow:hidden}.otif-card-head{display:flex;justify-content:space-between;align-items:flex-start}.otif-card-head span{display:block;font-size:13px;font-weight:700;color:var(--navy)}.otif-card-head small{display:block;font-size:10px;color:var(--muted);margin-top:3px}.otif-card-head strong{font:700 21px 'Space Grotesk'}.mini-chart{height:165px;margin-top:4px}.otif-result{font-size:11px;font-weight:700;text-align:right}.otif-result.pass{color:#20965F}.otif-result.fail{color:#D84F62}.service-summary{padding-bottom:16px}.service-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;padding:14px 16px}.service-kpis article{border-radius:11px;padding:14px;color:#fff}.service-kpis span,.service-kpis small{display:block;font-size:11px;color:rgba(255,255,255,.82)}.service-kpis b{display:block;font:700 21px 'Space Grotesk';margin:4px 0}.combined-chart{height:310px;margin:0 16px;border:1px solid #E1E8F0;border-radius:12px;padding:10px;background:#FAFCFF}.action-list{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:16px}.action-list>div{display:flex;gap:11px;padding:13px;border:1px solid #E3E9F0;background:#F8FAFC;border-radius:10px}.action-list>div>b{width:25px;height:25px;display:grid;place-items:center;border-radius:8px;background:#356FCB;color:#fff}.action-list strong,.action-list small{display:block}.action-list strong{font-size:12px}.action-list small{font-size:11px;color:var(--muted);line-height:1.45;margin-top:3px}
+      @media(max-width:1100px){.workflow-steps{grid-template-columns:repeat(5,1fr)}.workflow-steps>i{display:none}.analytics-grid{grid-template-columns:1fr}.insight-kpis,.otif-ops-grid{grid-template-columns:repeat(2,1fr)}.service-kpis{grid-template-columns:repeat(2,1fr)}}
+      @media(max-width:760px){.wms-app .content{padding-bottom:72px}.workflow-head,.analytics-toolbar{align-items:flex-start;flex-direction:column}.workflow-steps{display:flex;overflow-x:auto}.workflow-steps button{min-width:150px}.cost-story{grid-template-columns:1fr}.cost-story>div:first-child{border-right:0;border-bottom:1px solid rgba(255,255,255,.2);padding-bottom:14px}.insight-kpis,.otif-ops-grid,.otif-trend-grid,.service-kpis,.action-list{grid-template-columns:1fr}.analytics-toolbar h2{font-size:21px}.table-wrap{max-width:calc(100vw - 120px)}.chart-frame{height:250px}}
     `}</style>
   );
 }
